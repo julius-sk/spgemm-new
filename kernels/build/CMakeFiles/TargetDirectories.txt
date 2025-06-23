@@ -1,0 +1,3 @@
+/home/labuser/MaxK-GNN/kernels/build/CMakeFiles/maxk_kernel_test.dir
+/home/labuser/MaxK-GNN/kernels/build/CMakeFiles/edit_cache.dir
+/home/labuser/MaxK-GNN/kernels/build/CMakeFiles/rebuild_cache.dir
