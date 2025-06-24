@@ -1,0 +1,337 @@
+#include <torch/extension.h>
+#include <cuda_runtime.h>
+#include <vector>
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <stdexcept>
+#include <cstdint>
+
+// Forward declarations of CUDA kernels from spmm_maxk.cu and spmm_maxk_backward.cu
+extern "C" {
+    // From spmm_maxk.cu
+    void spmm_kernel_opt2_sparse_v3_wrapper(
+        const int* warp4, const int* idx, const float* val,
+        const float* vin_data, const uint8_t* vin_selector, float* vout,
+        const int num_v, const int num_e, const int feat_in, 
+        const int dim_sparse, const int num_warps,
+        dim3 grid, dim3 block, int shared_size
+    );
+    
+    // From spmm_maxk_backward.cu  
+    void spmm_kernel_opt2_sparse_backward_v3_wrapper(
+        const int* warp4, const int* idx, const float* val,
+        const float* vin_data, const uint8_t* vin_selector, float* vout,
+        const int num_v, const int num_e, const int feat_in,
+        const int dim_sparse, const int num_warps,
+        dim3 grid, dim3 block, int shared_size
+    );
+}
+
+// CUDA kernel wrapper functions
+torch::Tensor spmm_maxk_forward(
+    torch::Tensor warp4_metadata,     // Warp scheduling metadata
+    torch::Tensor indices,            // Graph indices (CSR format)
+    torch::Tensor values,             // Edge values
+    torch::Tensor input_data,         // Dense input features (sparse representation)
+    torch::Tensor sparse_selector,    // Sparse selector indices  
+    int num_warps,                    // Number of warps
+    int dim_sparse                    // Sparse dimension (k)
+) {
+    // Validate inputs
+    TORCH_CHECK(warp4_metadata.is_cuda(), "warp4_metadata must be CUDA tensor");
+    TORCH_CHECK(indices.is_cuda(), "indices must be CUDA tensor");
+    TORCH_CHECK(values.is_cuda(), "values must be CUDA tensor");
+    TORCH_CHECK(input_data.is_cuda(), "input_data must be CUDA tensor");
+    TORCH_CHECK(sparse_selector.is_cuda(), "sparse_selector must be CUDA tensor");
+    
+    TORCH_CHECK(warp4_metadata.dtype() == torch::kInt32, "warp4_metadata must be int32");
+    TORCH_CHECK(indices.dtype() == torch::kInt32, "indices must be int32");
+    TORCH_CHECK(values.dtype() == torch::kFloat32, "values must be float32");
+    TORCH_CHECK(input_data.dtype() == torch::kFloat32, "input_data must be float32");
+    TORCH_CHECK(sparse_selector.dtype() == torch::kUInt8, "sparse_selector must be uint8");
+    
+    // Get dimensions
+    int num_v = input_data.size(0);
+    int feat_in = input_data.size(1);
+    int num_e = indices.size(0);
+    
+    // Create output tensor
+    auto output = torch::zeros({num_v, feat_in}, 
+                              torch::TensorOptions()
+                              .dtype(torch::kFloat32)
+                              .device(input_data.device()));
+    
+    // Calculate grid and block dimensions (from spmm_maxk.cu logic)
+    const int WARPS_PER_BLOCK = 12;
+    const int EXT_WARP_DIM = 32;
+    
+    int block_num = (num_warps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+    dim3 grid(block_num);
+    dim3 block(WARPS_PER_BLOCK * EXT_WARP_DIM);
+    
+    // Calculate shared memory size
+    int shared_size = WARPS_PER_BLOCK * feat_in * sizeof(float);
+    
+    // Call CUDA kernel
+    spmm_kernel_opt2_sparse_v3_wrapper(
+        warp4_metadata.data_ptr<int>(),
+        indices.data_ptr<int>(),
+        values.data_ptr<float>(),
+        input_data.data_ptr<float>(),
+        sparse_selector.data_ptr<uint8_t>(),
+        output.data_ptr<float>(),
+        num_v, num_e, feat_in, dim_sparse, num_warps,
+        grid, block, shared_size
+    );
+    
+    // Check for CUDA errors
+    cudaError_t error = cudaGetLastError();
+    TORCH_CHECK(error == cudaSuccess, "CUDA kernel failed: ", cudaGetErrorString(error));
+    
+    return output;
+}
+
+torch::Tensor spmm_maxk_backward(
+    torch::Tensor warp4_metadata,     // Warp scheduling metadata
+    torch::Tensor indices,            // Graph indices (CSR format)  
+    torch::Tensor values,             // Edge values
+    torch::Tensor grad_output,        // Gradient from next layer
+    torch::Tensor sparse_selector,    // Sparse selector indices
+    int num_warps,                    // Number of warps
+    int dim_sparse                    // Sparse dimension (k)
+) {
+    // Validate inputs
+    TORCH_CHECK(warp4_metadata.is_cuda(), "warp4_metadata must be CUDA tensor");
+    TORCH_CHECK(indices.is_cuda(), "indices must be CUDA tensor");
+    TORCH_CHECK(values.is_cuda(), "values must be CUDA tensor");
+    TORCH_CHECK(grad_output.is_cuda(), "grad_output must be CUDA tensor");
+    TORCH_CHECK(sparse_selector.is_cuda(), "sparse_selector must be CUDA tensor");
+    
+    // Get dimensions
+    int num_v = grad_output.size(0);
+    int feat_in = grad_output.size(1);
+    int num_e = indices.size(0);
+    
+    // Create output tensor (sparse format)
+    auto grad_input = torch::zeros({num_v, dim_sparse},
+                                  torch::TensorOptions()
+                                  .dtype(torch::kFloat32)
+                                  .device(grad_output.device()));
+    
+    // Calculate grid and block dimensions
+    const int WARPS_PER_BLOCK = 12;
+    const int EXT_WARP_DIM = 32;
+    
+    int block_num = (num_warps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+    dim3 grid(block_num);
+    dim3 block(WARPS_PER_BLOCK * EXT_WARP_DIM);
+    
+    // Calculate shared memory size
+    int shared_size = WARPS_PER_BLOCK * feat_in * sizeof(float);
+    
+    // Call CUDA kernel
+    spmm_kernel_opt2_sparse_backward_v3_wrapper(
+        warp4_metadata.data_ptr<int>(),
+        indices.data_ptr<int>(),
+        values.data_ptr<float>(),
+        grad_output.data_ptr<float>(),
+        sparse_selector.data_ptr<uint8_t>(),
+        grad_input.data_ptr<float>(),
+        num_v, num_e, feat_in, dim_sparse, num_warps,
+        grid, block, shared_size
+    );
+    
+    // Check for CUDA errors
+    cudaError_t error = cudaGetLastError();
+    TORCH_CHECK(error == cudaSuccess, "CUDA kernel failed: ", cudaGetErrorString(error));
+    
+    return grad_input;
+}
+
+// Utility function to load warp4 metadata
+torch::Tensor load_warp4_metadata(const std::string& graph_name, 
+                                  int num_warps = 12, int warp_max_nz = 64) {
+    std::string meta_dir = "../w" + std::to_string(num_warps) + "_nz" + 
+                          std::to_string(warp_max_nz) + "_warp_4/";
+    std::string warp4_file = meta_dir + graph_name + ".warp4";
+    
+    // Read binary file
+    std::ifstream file(warp4_file, std::ios::binary);
+    if (!file.is_open()) {
+        throw std::runtime_error("Cannot open warp4 file: " + warp4_file);
+    }
+    
+    // Get file size
+    file.seekg(0, std::ios::end);
+    std::streampos file_size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    
+    // Read data
+    size_t num_elements = static_cast<size_t>(file_size) / sizeof(int32_t);
+    std::vector<int32_t> warp4_data(num_elements);
+    file.read(reinterpret_cast<char*>(warp4_data.data()), static_cast<std::streamsize>(file_size));
+    file.close();
+    
+    // Convert to tensor
+    auto tensor = torch::from_blob(warp4_data.data(), {static_cast<long>(warp4_data.size())}, 
+                                  torch::TensorOptions().dtype(torch::kInt32))
+                  .clone().cuda();
+    
+    return tensor;
+}
+
+// Generate sparse selector (replicates main.cu logic)
+torch::Tensor generate_sparse_selector(int num_v, int dim_origin, int dim_sparse) {
+    auto selector = torch::zeros({num_v, dim_sparse}, 
+                                torch::TensorOptions()
+                                .dtype(torch::kUInt8)
+                                .device(torch::kCUDA));
+    
+    // Use same random seed as main.cu
+    torch::manual_seed(123);
+    
+    for (int i = 0; i < num_v; i++) {
+        auto indices = torch::randperm(dim_origin, 
+                                     torch::TensorOptions()
+                                     .dtype(torch::kInt64)
+                                     .device(torch::kCUDA))
+                      .slice(0, 0, dim_sparse)
+                      .to(torch::kUInt8);
+        selector[i] = indices;
+    }
+    
+    return selector;
+}
+
+// Simple timing class
+class SimpleCudaTimer {
+public:
+    SimpleCudaTimer() {
+        cudaEventCreate(&start_);
+        cudaEventCreate(&stop_);
+    }
+    
+    ~SimpleCudaTimer() {
+        cudaEventDestroy(start_);
+        cudaEventDestroy(stop_);
+    }
+    
+    void start() {
+        cudaEventRecord(start_);
+    }
+    
+    float stop() {
+        cudaEventRecord(stop_);
+        cudaEventSynchronize(stop_);
+        float elapsed;
+        cudaEventElapsedTime(&elapsed, start_, stop_);
+        return elapsed; // milliseconds
+    }
+    
+private:
+    cudaEvent_t start_, stop_;
+};
+
+// Benchmark function that mimics main.cu timing
+std::vector<float> benchmark_spmm_maxk(
+    torch::Tensor warp4_metadata,
+    torch::Tensor indices,
+    torch::Tensor values, 
+    torch::Tensor input_data,
+    torch::Tensor sparse_selector,
+    int num_warps,
+    int dim_sparse,
+    int num_runs = 4
+) {
+    std::vector<float> times;
+    SimpleCudaTimer timer;
+    
+    // Warmup runs
+    for (int i = 0; i < num_runs; i++) {
+        spmm_maxk_forward(warp4_metadata, indices, values, input_data, 
+                         sparse_selector, num_warps, dim_sparse);
+    }
+    cudaDeviceSynchronize();
+    
+    // Timing runs
+    for (int i = 0; i < num_runs; i++) {
+        timer.start();
+        auto result = spmm_maxk_forward(warp4_metadata, indices, values, input_data,
+                                       sparse_selector, num_warps, dim_sparse);
+        float elapsed = timer.stop();
+        times.push_back(elapsed);
+    }
+    
+    return times;
+}
+
+// Validation function
+bool validate_spmm_maxk(
+    torch::Tensor warp4_metadata,
+    torch::Tensor indices,
+    torch::Tensor values,
+    torch::Tensor input_data,
+    torch::Tensor sparse_selector,
+    torch::Tensor reference_output,
+    int num_warps,
+    int dim_sparse,
+    float tolerance = 0.001f
+) {
+    auto maxk_output = spmm_maxk_forward(warp4_metadata, indices, values, input_data,
+                                        sparse_selector, num_warps, dim_sparse);
+    
+    auto diff = torch::abs(maxk_output - reference_output);
+    float max_diff = torch::max(diff).item<float>();
+    float avg_diff = torch::mean(diff).item<float>();
+    
+    std::cout << "Validation - Max diff: " << max_diff 
+              << ", Avg diff: " << avg_diff << std::endl;
+    
+    return avg_diff < tolerance;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.doc() = "Direct CUDA kernel bindings for MaxK-GNN SPMM operations";
+    
+    // Main kernel functions
+    m.def("spmm_maxk_forward", &spmm_maxk_forward, 
+          "MaxK-GNN forward SPMM kernel",
+          pybind11::arg("warp4_metadata"), pybind11::arg("indices"), pybind11::arg("values"),
+          pybind11::arg("input_data"), pybind11::arg("sparse_selector"), 
+          pybind11::arg("num_warps"), pybind11::arg("dim_sparse"));
+    
+    m.def("spmm_maxk_backward", &spmm_maxk_backward,
+          "MaxK-GNN backward SPMM kernel", 
+          pybind11::arg("warp4_metadata"), pybind11::arg("indices"), pybind11::arg("values"),
+          pybind11::arg("grad_output"), pybind11::arg("sparse_selector"),
+          pybind11::arg("num_warps"), pybind11::arg("dim_sparse"));
+    
+    // Utility functions
+    m.def("load_warp4_metadata", &load_warp4_metadata,
+          "Load warp4 metadata from file",
+          pybind11::arg("graph_name"), pybind11::arg("num_warps") = 12, pybind11::arg("warp_max_nz") = 64);
+    
+    m.def("generate_sparse_selector", &generate_sparse_selector,
+          "Generate sparse selector tensor",
+          pybind11::arg("num_v"), pybind11::arg("dim_origin"), pybind11::arg("dim_sparse"));
+    
+    // Benchmarking functions
+    m.def("benchmark_spmm_maxk", &benchmark_spmm_maxk,
+          "Benchmark MaxK-GNN SPMM kernel",
+          pybind11::arg("warp4_metadata"), pybind11::arg("indices"), pybind11::arg("values"),
+          pybind11::arg("input_data"), pybind11::arg("sparse_selector"),
+          pybind11::arg("num_warps"), pybind11::arg("dim_sparse"), pybind11::arg("num_runs") = 4);
+    
+    m.def("validate_spmm_maxk", &validate_spmm_maxk,
+          "Validate MaxK-GNN kernel against reference",
+          pybind11::arg("warp4_metadata"), pybind11::arg("indices"), pybind11::arg("values"),
+          pybind11::arg("input_data"), pybind11::arg("sparse_selector"), pybind11::arg("reference_output"),
+          pybind11::arg("num_warps"), pybind11::arg("dim_sparse"), pybind11::arg("tolerance") = 0.001f);
+    
+    // Expose SimpleCudaTimer class
+    pybind11::class_<SimpleCudaTimer>(m, "CudaTimer")
+        .def(pybind11::init<>())
+        .def("start", &SimpleCudaTimer::start)
+        .def("stop", &SimpleCudaTimer::stop);
+}
