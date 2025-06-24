@@ -191,60 +191,90 @@ class DirectMaxKKernels:
             )
             return grad_input, 0.0
     
-    def validate_against_cusparse(self, graph_data, input_features, dim_k, tolerance=0.001):
-        """
-        FIXED: Proper validation that actually compares the results!
+def validate_against_cusparse(self, graph_data, input_features, dim_k, tolerance=0.001):
+    """
+    FIXED: Handle dimension mismatch between sparse and full outputs
+    """
+    if not DIRECT_KERNELS_AVAILABLE:
+        print("⚠️ Cannot validate - direct kernels not available")
+        return False
+    
+    print(f"🔍 Validating MaxK kernel vs cuSPARSE for k={dim_k}")
+    
+    # Step 1: Create TopK sparse input
+    topk_values, topk_indices = torch.topk(input_features, dim_k, dim=1)
+    sparse_input_full = torch.zeros_like(input_features)
+    sparse_input_full.scatter_(1, topk_indices, topk_values)
+    
+    print(f"📊 Input shapes:")
+    print(f"   input_features: {input_features.shape}")
+    print(f"   topk_values: {topk_values.shape}")
+    print(f"   topk_indices: {topk_indices.shape}")
+    print(f"   sparse_input_full: {sparse_input_full.shape}")
+    
+    # Step 2: Run MaxK kernel - returns SPARSE output (v_num, dim_k)
+    maxk_sparse_output, _ = self.run_forward_kernel(graph_data, input_features, dim_k, timing=False)
+    
+    print(f"📊 MaxK kernel output:")
+    print(f"   maxk_sparse_output shape: {maxk_sparse_output.shape}")
+    print(f"   maxk_sparse_output[0,:5]: {maxk_sparse_output[0,:5]}")
+    print(f"   maxk_sparse_output range: [{maxk_sparse_output.min():.6f}, {maxk_sparse_output.max():.6f}]")
+    print(f"   maxk_sparse_output non-zero: {torch.count_nonzero(maxk_sparse_output).item()}/{maxk_sparse_output.numel()}")
+    
+    # Step 3: Convert MaxK sparse output back to full dimensions
+    maxk_full_output = torch.zeros_like(input_features)
+    for i in range(input_features.shape[0]):
+        for j in range(dim_k):
+            idx = topk_indices[i, j].item()
+            maxk_full_output[i, idx] = maxk_sparse_output[i, j]
+    
+    print(f"📊 MaxK full output:")
+    print(f"   maxk_full_output shape: {maxk_full_output.shape}")
+    print(f"   maxk_full_output[0,:10]: {maxk_full_output[0,:10]}")
+    print(f"   maxk_full_output non-zero: {torch.count_nonzero(maxk_full_output).item()}/{maxk_full_output.numel()}")
+    
+    # Step 4: Run cuSPARSE reference 
+    v_num = input_features.shape[0]
+    edge_index = torch.stack([
+        torch.arange(v_num, device='cuda').repeat_interleave(
+            graph_data['indptr'][1:] - graph_data['indptr'][:-1]
+        ),
+        graph_data['indices']
+    ])
+    
+    sparse_adj = torch.sparse_coo_tensor(
+        edge_index, graph_data['values'], (v_num, v_num)
+    ).coalesce()
+    
+    cusparse_output = torch.sparse.mm(sparse_adj, sparse_input_full)
+    
+    print(f"📊 cuSPARSE output:")
+    print(f"   cusparse_output shape: {cusparse_output.shape}")
+    print(f"   cusparse_output[0,:10]: {cusparse_output[0,:10]}")
+    print(f"   cusparse_output range: [{cusparse_output.min():.6f}, {cusparse_output.max():.6f}]")
+    print(f"   cusparse_output non-zero: {torch.count_nonzero(cusparse_output).item()}/{cusparse_output.numel()}")
+    
+    # Step 5: Now both are (v_num, 256) - compare them
+    error = torch.abs(maxk_full_output - cusparse_output).max().item()
+    avg_error = torch.abs(maxk_full_output - cusparse_output).mean().item()
+    
+    print(f"📊 Comparison:")
+    print(f"   Max error: {error:.8f}")
+    print(f"   Avg error: {avg_error:.8f}")
+    print(f"   Tolerance: {tolerance}")
+    
+    # Show first few differences
+    diff = torch.abs(maxk_full_output - cusparse_output)
+    print(f"   First 10 differences: {diff[0,:10]}")
+    
+    is_valid = error < tolerance
+    
+    if is_valid:
+        print("✅ Validation PASSED!")
+    else:
+        print("❌ Validation FAILED!")
         
-        Both MaxK kernel and cuSPARSE should do the SAME operation:
-        Matrix multiplication of adjacency matrix with TopK-sparse input
-        """
-        if not DIRECT_KERNELS_AVAILABLE:
-            print("⚠️ Cannot validate - direct kernels not available")
-            return False
-        
-        print(f"🔍 Validating MaxK kernel vs cuSPARSE for k={dim_k}")
-        
-        # Step 1: Create TopK sparse input (what both should multiply)
-        topk_values, topk_indices = torch.topk(input_features, dim_k, dim=1)
-        sparse_input_full = torch.zeros_like(input_features)
-        sparse_input_full.scatter_(1, topk_indices, topk_values)
-        
-        # Step 2: Run MaxK kernel (A × TopK(X))
-        maxk_output, _ = self.run_forward_kernel(graph_data, input_features, dim_k, timing=False)
-        
-        # Step 3: Run cuSPARSE reference on SAME sparse input (A × TopK(X))
-        v_num = input_features.shape[0]
-        edge_index = torch.stack([
-            torch.arange(v_num, device='cuda').repeat_interleave(
-                graph_data['indptr'][1:] - graph_data['indptr'][:-1]
-            ),
-            graph_data['indices']
-        ])
-        
-        sparse_adj = torch.sparse_coo_tensor(
-            edge_index, graph_data['values'], (v_num, v_num)
-        ).coalesce()
-        
-        cusparse_output = torch.sparse.mm(sparse_adj, sparse_input_full)
-        
-        # Step 4: ACTUALLY COMPARE THE RESULTS (finally!)
-        error = torch.abs(maxk_output - cusparse_output).max().item()
-        avg_error = torch.abs(maxk_output - cusparse_output).mean().item()
-        
-        is_valid = error < tolerance
-        
-        print(f"   Max error: {error:.8f}")
-        print(f"   Avg error: {avg_error:.8f}")
-        print(f"   Tolerance: {tolerance}")
-        
-        if is_valid:
-            print("✅ Validation PASSED! MaxK kernel produces correct results")
-        else:
-            print("❌ Validation FAILED! MaxK kernel has errors")
-            print(f"   MaxK output range: [{maxk_output.min():.6f}, {maxk_output.max():.6f}]")
-            print(f"   cuSPARSE output range: [{cusparse_output.min():.6f}, {cusparse_output.max():.6f}]")
-            
-        return is_valid
+    return is_valid
     
     def benchmark_all_k_values(self, graph_data, dim_origin=256, k_values=[16, 32, 64], 
                               num_runs=4):
