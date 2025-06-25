@@ -26,6 +26,12 @@ extern "C" {
         const int dim_sparse, const int num_warps,
         dim3 grid, dim3 block, int shared_size
     );
+    
+    // ADD: TopK kernel from maxk_kernel.cu
+    void topk_kernel_wrapper(
+        uint8_t* data, uint8_t* value, uint8_t* index, uint k,
+        int N, int dim_origin, dim3 grid, dim3 block, int shared_size
+    );
 }
 
 // Declare cuSPARSE function (C++ linkage, not extern "C")
@@ -152,6 +158,96 @@ torch::Tensor spmm_maxk_backward(
     TORCH_CHECK(error == cudaSuccess, "CUDA kernel failed: ", cudaGetErrorString(error));
     
     return grad_input;
+}
+
+// ADD: TopK kernel wrapper functions
+std::tuple<torch::Tensor, torch::Tensor> cuda_topk_maxk(
+    torch::Tensor input, int k) {
+    
+    TORCH_CHECK(input.is_cuda(), "Input must be on CUDA");
+    TORCH_CHECK(input.dim() == 2, "Input must be 2D tensor");
+    TORCH_CHECK(input.dtype() == torch::kUInt8, "Input must be uint8 tensor");
+    TORCH_CHECK(k > 0 && k <= input.size(1), "Invalid k value");
+    
+    int N = input.size(0);
+    int dim_origin = input.size(1);
+    
+    // Create output tensors
+    auto options = torch::TensorOptions().dtype(torch::kUInt8).device(input.device());
+    torch::Tensor values = torch::zeros({N, k}, options);
+    torch::Tensor indices = torch::zeros({N, k}, options);
+    
+    // Calculate grid and block dimensions (from maxk_kernel.cu constants)
+    const int WARPS_PER_BLOCK = 16;
+    int block_size = WARPS_PER_BLOCK * 32;  // 32 threads per warp
+    int grid_size = (N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+    int shared_size = WARPS_PER_BLOCK * (dim_origin + 2 * k + 1);
+    
+    dim3 grid(grid_size);
+    dim3 block(block_size);
+    
+    // Launch the CUDA kernel via wrapper
+    topk_kernel_wrapper(
+        input.data_ptr<uint8_t>(),
+        values.data_ptr<uint8_t>(),
+        indices.data_ptr<uint8_t>(),
+        k, N, dim_origin, grid, block, shared_size
+    );
+    
+    // Synchronize to ensure completion
+    cudaDeviceSynchronize();
+    
+    return std::make_tuple(values, indices);
+}
+
+std::tuple<torch::Tensor, torch::Tensor> cuda_topk_maxk_float(
+    torch::Tensor input, int k) {
+    
+    TORCH_CHECK(input.is_cuda(), "Input must be on CUDA");
+    TORCH_CHECK(input.dim() == 2, "Input must be 2D tensor");
+    TORCH_CHECK(k > 0 && k <= input.size(1), "Invalid k value");
+    
+    // If input is float, convert to uint8 for kernel processing
+    torch::Tensor input_uint8;
+    if (input.dtype() == torch::kFloat32) {
+        // Scale and convert to uint8 (0-255 range)
+        auto normalized = torch::clamp((input * 255.0).round(), 0, 255);
+        input_uint8 = normalized.to(torch::kUInt8);
+    } else if (input.dtype() == torch::kUInt8) {
+        input_uint8 = input;
+    } else {
+        TORCH_CHECK(false, "Input must be float32 or uint8");
+    }
+    
+    // Run the uint8 kernel
+    auto [values_uint8, indices_uint8] = cuda_topk_maxk(input_uint8, k);
+    
+    // Convert results back to appropriate types
+    torch::Tensor values, indices;
+    
+    if (input.dtype() == torch::kFloat32) {
+        // Convert values back to float
+        values = values_uint8.to(torch::kFloat32) / 255.0;
+        indices = indices_uint8.to(torch::kInt32);
+    } else {
+        values = values_uint8;
+        indices = indices_uint8.to(torch::kInt32);
+    }
+    
+    return std::make_tuple(values, indices);
+}
+
+std::tuple<torch::Tensor, torch::Tensor> prepare_cbsr_format_maxk(
+    torch::Tensor features, int maxk) {
+    
+    TORCH_CHECK(features.is_cuda(), "Features must be on CUDA");
+    TORCH_CHECK(features.dim() == 2, "Features must be 2D tensor");
+    TORCH_CHECK(maxk > 0 && maxk <= features.size(1), "Invalid maxk value");
+    
+    // Use our enhanced TopK function
+    auto [sparse_data, sparse_indices] = cuda_topk_maxk_float(features, maxk);
+    
+    return std::make_tuple(sparse_data, sparse_indices);
 }
 
 torch::Tensor cusparse_spmm_wrapper(
@@ -345,6 +441,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("warp4_metadata"), pybind11::arg("indices"), pybind11::arg("values"),
           pybind11::arg("grad_output"), pybind11::arg("sparse_selector"),
           pybind11::arg("num_warps"), pybind11::arg("dim_sparse"));
+    
+    // ADD: TopK kernel functions
+    m.def("cuda_topk_maxk", &cuda_topk_maxk,
+          "Fast CUDA TopK kernel for uint8 tensors",
+          pybind11::arg("input"), pybind11::arg("k"));
+    
+    m.def("cuda_topk_maxk_float", &cuda_topk_maxk_float,
+          "Fast CUDA TopK kernel for float tensors",
+          pybind11::arg("input"), pybind11::arg("k"));
+    
+    m.def("prepare_cbsr_format_maxk", &prepare_cbsr_format_maxk,
+          "Prepare CBSR format using MaxK TopK kernel",
+          pybind11::arg("features"), pybind11::arg("maxk"));
     
     // Utility functions
     m.def("load_warp4_metadata", &load_warp4_metadata,
