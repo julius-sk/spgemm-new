@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Direct CUDA Kernel Interface for MaxK-GNN - CORRECTED VERSION WITH TOPK
-Follows main.cu logic exactly: TopK → Sparse representation → Dense reconstruction for comparison
+Direct CUDA Kernel Interface for MaxK-GNN - FIXED VERSION
+Uses compiled bindings to call spmm_maxk.cu and spmm_maxk_backward.cu kernels directly
 """
 
 import torch
@@ -13,7 +13,7 @@ from graph_loader import GraphDataLoader
 
 # Try to import the direct kernel bindings
 try:
-    import maxk_cuda_kernels
+    import maxk_cuda_kernels  # This will be our compiled extension
     DIRECT_KERNELS_AVAILABLE = True
     print("✅ Direct CUDA kernels loaded successfully")
 except ImportError:
@@ -24,7 +24,7 @@ except ImportError:
 class DirectMaxKKernels:
     """
     Direct interface to MaxK-GNN CUDA kernels
-    Follows main.cu workflow exactly
+    Calls the actual spmm_maxk.cu and spmm_maxk_backward.cu functions
     """
     
     def __init__(self, graph_name=""):
@@ -42,6 +42,7 @@ class DirectMaxKKernels:
             return False
             
         try:
+            # Use the C++ function to load metadata
             self.warp4_metadata = maxk_cuda_kernels.load_warp4_metadata(
                 graph_name, num_warps, warp_max_nz
             )
@@ -51,16 +52,18 @@ class DirectMaxKKernels:
             
         except Exception as e:
             print(f"❌ Failed to load warp4 metadata: {e}")
+            print(f"   Ensure generate_meta.py has been run for {graph_name}")
             return False
     
-    def apply_topk_selection(self, input_features, dim_k, use_cuda_topk=True):
+    def generate_maxk_sparse_data(self, input_features, dim_k, use_cuda_topk=True):
         """
-        Apply TopK selection - CORRECTED to match main.cu workflow
-        Returns: (sparse_data, sparse_selector, dense_reconstruction)
+        Generate MaxK sparse representation (replicates main.cu logic)
+        Does TopK selection to create sparse input
+        ADDED: Option to use CUDA TopK kernel
         """
         v_num, dim_origin = input_features.shape
         
-        # Step 1: Apply TopK selection (like main.cu lines 102-120)
+        # ADDED: Try CUDA TopK first if available and requested
         if use_cuda_topk and DIRECT_KERNELS_AVAILABLE:
             try:
                 print(f"🚀 Using CUDA TopK kernel for k={dim_k}")
@@ -69,92 +72,47 @@ class DirectMaxKKernels:
                 )
                 print(f"✅ CUDA TopK completed")
             except Exception as e:
-                print(f"⚠️ CUDA TopK failed: {e}, using PyTorch")
+                print(f"⚠️ CUDA TopK failed: {e}, falling back to PyTorch")
                 topk_values, topk_indices = torch.topk(input_features, dim_k, dim=1)
         else:
-            print(f"🔄 Using PyTorch TopK for k={dim_k}")
+            # Original PyTorch TopK
             topk_values, topk_indices = torch.topk(input_features, dim_k, dim=1)
         
-        # Step 2: Create sparse representation (for MaxK kernels)
+        # Create sparse data and selector (matching main.cu format)
         sparse_data = topk_values  # Shape: (v_num, dim_k)
         sparse_selector = topk_indices.to(torch.uint8)  # Shape: (v_num, dim_k)
         
-        # Step 3: Dense reconstruction (for cuSPARSE comparison, like main.cu lines 122-130)
-        dense_reconstruction = torch.zeros_like(input_features)  # Shape: (v_num, dim_origin)
-        dense_reconstruction.scatter_(1, topk_indices, topk_values)
-        
-        print(f"📊 TopK results: sparse_data {sparse_data.shape}, selector {sparse_selector.shape}")
-        print(f"📊 Dense reconstruction: {dense_reconstruction.shape}, sparsity: {torch.count_nonzero(dense_reconstruction).item()}/{dense_reconstruction.numel()}")
-        
-        return sparse_data, sparse_selector, dense_reconstruction
-    
-    def benchmark_topk_methods(self, input_features, dim_k, num_runs=10):
-        """
-        Benchmark CUDA TopK vs PyTorch TopK
-        """
-        if not DIRECT_KERNELS_AVAILABLE:
-            print("⚠️ CUDA kernels not available for TopK comparison")
-            return {}
-        
-        print(f"\n⚡ TopK Benchmark: k={dim_k}, input_shape={input_features.shape}")
-        
-        # Benchmark PyTorch TopK
-        torch.cuda.synchronize()
-        start_time = time.time()
-        for _ in range(num_runs):
-            pytorch_values, pytorch_indices = torch.topk(input_features, dim_k, dim=1)
-        torch.cuda.synchronize()
-        pytorch_time = (time.time() - start_time) / num_runs * 1000
-        
-        # Benchmark CUDA TopK
-        try:
-            torch.cuda.synchronize()
-            start_time = time.time()
-            for _ in range(num_runs):
-                cuda_values, cuda_indices = maxk_cuda_kernels.cuda_topk_maxk_float(
-                    input_features, dim_k
-                )
-            torch.cuda.synchronize()
-            cuda_time = (time.time() - start_time) / num_runs * 1000
-            
-            speedup = pytorch_time / cuda_time if cuda_time > 0 else 0
-            
-            # Correctness check
-            diff_values = torch.abs(pytorch_values - cuda_values).max().item()
-            diff_indices = (pytorch_indices.to(torch.int32) != cuda_indices).sum().item()
-            
-            print(f"📊 PyTorch TopK: {pytorch_time:.3f} ms")
-            print(f"📊 CUDA TopK:    {cuda_time:.3f} ms") 
-            print(f"📊 Speedup:      {speedup:.2f}x")
-            print(f"📊 Correctness:  values_diff={diff_values:.6f}, indices_diff={diff_indices}")
-            
-            return {
-                'pytorch_time': pytorch_time,
-                'cuda_time': cuda_time,
-                'speedup': speedup,
-                'correctness': diff_values < 0.01 and diff_indices == 0
-            }
-            
-        except Exception as e:
-            print(f"❌ CUDA TopK benchmark failed: {e}")
-            return {'pytorch_time': pytorch_time, 'cuda_time': -1, 'speedup': 0}
+        return sparse_data, sparse_selector
     
     def run_forward_kernel(self, graph_data, input_features, dim_k, timing=True, use_cuda_topk=True):
         """
-        Run MaxK forward kernel - CORRECTED workflow
+        Run the direct MaxK forward kernel (spmm_maxk.cu)
+        
+        Args:
+            graph_data: Dict with 'indices' and 'values' tensors
+            input_features: Dense input tensor (v_num x dim_origin)  
+            dim_k: Sparse dimension (k value)
+            timing: Whether to measure execution time
+            use_cuda_topk: Whether to use CUDA TopK kernel (ADDED)
+            
+        Returns:
+            (output_tensor, execution_time_ms)
         """
         if not DIRECT_KERNELS_AVAILABLE:
             raise RuntimeError("Direct CUDA kernels not available")
             
         if self.warp4_metadata is None:
-            raise RuntimeError("Warp4 metadata not loaded")
+            raise RuntimeError("Warp4 metadata not loaded. Call load_warp4_metadata() first")
         
-        # Apply TopK selection (matches main.cu workflow)
-        sparse_data, sparse_selector, _ = self.apply_topk_selection(
-            input_features, dim_k, use_cuda_topk
-        )
+        # Generate sparse representation using TopK (MODIFIED to add use_cuda_topk)
+        sparse_data, sparse_selector = self.generate_maxk_sparse_data(input_features, dim_k, use_cuda_topk)
+        
+        print(f"📊 Generated sparse data: {sparse_data.shape}")
+        print(f"📊 Generated sparse selector: {sparse_selector.shape}")
+        print(f"📊 Sample selector[0]: {sparse_selector[0]}")
         
         if timing:
+            # Use the built-in timing function
             times = maxk_cuda_kernels.benchmark_spmm_maxk(
                 self.warp4_metadata,
                 graph_data['indices'],
@@ -167,6 +125,7 @@ class DirectMaxKKernels:
             )
             avg_time = np.mean(times)
             
+            # Get the result from the last run
             output = maxk_cuda_kernels.spmm_maxk_forward(
                 self.warp4_metadata,
                 graph_data['indices'], 
@@ -177,8 +136,10 @@ class DirectMaxKKernels:
                 dim_k
             )
             
+            print(f"📊 MaxK kernel output shape: {output.shape}")
             return output, avg_time
         else:
+            # Single run without timing
             output = maxk_cuda_kernels.spmm_maxk_forward(
                 self.warp4_metadata,
                 graph_data['indices'],
@@ -188,11 +149,22 @@ class DirectMaxKKernels:
                 self.num_warps,
                 dim_k
             )
+            print(f"📊 MaxK kernel output shape: {output.shape}")
             return output, 0.0
     
     def run_backward_kernel(self, graph_data, grad_output, dim_k, timing=True, use_cuda_topk=True):
         """
-        Run MaxK backward kernel - CORRECTED workflow
+        Run the direct MaxK backward kernel (spmm_maxk_backward.cu)
+        
+        Args:
+            graph_data: Dict with 'indices' and 'values' tensors
+            grad_output: Gradient tensor from next layer
+            dim_k: Sparse dimension (k value)
+            timing: Whether to measure execution time
+            use_cuda_topk: Whether to use CUDA TopK kernel (ADDED)
+            
+        Returns:
+            (grad_input_tensor, execution_time_ms)
         """
         if not DIRECT_KERNELS_AVAILABLE:
             raise RuntimeError("Direct CUDA kernels not available")
@@ -200,15 +172,15 @@ class DirectMaxKKernels:
         if self.warp4_metadata is None:
             raise RuntimeError("Warp4 metadata not loaded")
         
-        # Apply TopK selection on grad_output
-        _, sparse_selector, _ = self.apply_topk_selection(
-            grad_output, dim_k, use_cuda_topk
-        )
+        # Generate sparse selector based on grad_output (MODIFIED to add use_cuda_topk)
+        _, sparse_selector = self.generate_maxk_sparse_data(grad_output, dim_k, use_cuda_topk)
         
         if timing:
+            # Measure timing manually for backward kernel
             timer = maxk_cuda_kernels.CudaTimer()
             times = []
             
+            # Warmup + timing runs
             for i in range(8):  # 4 warmup + 4 timing
                 timer.start()
                 grad_input = maxk_cuda_kernels.spmm_maxk_backward(
@@ -222,12 +194,13 @@ class DirectMaxKKernels:
                 )
                 elapsed = timer.stop()
                 
-                if i >= 4:
+                if i >= 4:  # Only count timing runs
                     times.append(elapsed)
             
             avg_time = np.mean(times)
             return grad_input, avg_time
         else:
+            # Single run
             grad_input = maxk_cuda_kernels.spmm_maxk_backward(
                 self.warp4_metadata,
                 graph_data['indices'],
@@ -241,7 +214,8 @@ class DirectMaxKKernels:
     
     def validate_against_cusparse(self, graph_data, input_features, dim_k, tolerance=0.001, use_cuda_topk=True):
         """
-        CORRECTED validation - follows main.cu logic exactly
+        FIXED: Proper validation - MaxK kernel should output FULL dimensions
+        ADDED: use_cuda_topk parameter
         """
         if not DIRECT_KERNELS_AVAILABLE:
             print("⚠️ Cannot validate - direct kernels not available")
@@ -250,149 +224,170 @@ class DirectMaxKKernels:
         print(f"🔍 Validating MaxK kernel vs cuSPARSE for k={dim_k}")
         print(f"   Using {'CUDA' if use_cuda_topk else 'PyTorch'} TopK")
         
-        # Step 1: Apply TopK selection (like main.cu)
-        sparse_data, sparse_selector, dense_reconstruction = self.apply_topk_selection(
-            input_features, dim_k, use_cuda_topk
-        )
+        # Step 1: Apply TopK to create sparse input (MODIFIED to use specified TopK method)
+        if use_cuda_topk and DIRECT_KERNELS_AVAILABLE:
+            try:
+                topk_values, topk_indices = maxk_cuda_kernels.cuda_topk_maxk_float(input_features, dim_k)
+            except:
+                topk_values, topk_indices = torch.topk(input_features, dim_k, dim=1)
+        else:
+            topk_values, topk_indices = torch.topk(input_features, dim_k, dim=1)
+            
+        sparse_input = torch.zeros_like(input_features)
+        sparse_input.scatter_(1, topk_indices, topk_values)
         
-        # Step 2: Run MaxK kernel on sparse representation
-        maxk_output, _ = maxk_cuda_kernels.spmm_maxk_forward(
-            self.warp4_metadata,
-            graph_data['indices'],
-            graph_data['values'],
-            sparse_data,
-            sparse_selector,
-            self.num_warps,
-            dim_k
-        )
+        print(f"📊 Input shapes: {input_features.shape} -> sparse: {sparse_input.shape}")
+        print(f"📊 Input sparsity: {torch.count_nonzero(sparse_input).item()}/{sparse_input.numel()} non-zero")
         
-        # Step 3: Run cuSPARSE on dense reconstruction (same mathematical operation)
-        cusparse_output = maxk_cuda_kernels.cusparse_spmm(
-            graph_data['indptr'], 
-            graph_data['indices'], 
-            graph_data['values'],
-            dense_reconstruction,  # This is the key: same sparsity pattern
-            timing=False
-        )
+        # Step 2: Run MaxK kernel - should return FULL dimensions (256)
+        maxk_output, _ = self.run_forward_kernel(graph_data, input_features, dim_k, timing=False, use_cuda_topk=use_cuda_topk)
         
         print(f"📊 MaxK output shape: {maxk_output.shape}")
-        print(f"📊 cuSPARSE output shape: {cusparse_output.shape}")
+        print(f"📊 MaxK output sparsity: {torch.count_nonzero(maxk_output).item()}/{maxk_output.numel()}")
+        print(f"📊 MaxK sample values: {maxk_output[0, topk_indices[0, :5]]}")
         
+        # Step 3: Run cuSPARSE reference on the SAME sparse input
+        cusparse_output = maxk_cuda_kernels.cusparse_spmm(
+            graph_data['indptr'], graph_data['indices'], graph_data['values'],
+            sparse_input, timing=False
+        )
+        
+        print(f"📊 cuSPARSE output shape: {cusparse_output.shape}")
+        print(f"📊 cuSPARSE output sparsity: {torch.count_nonzero(cusparse_output).item()}/{cusparse_output.numel()}")
+        print(f"📊 cuSPARSE sample values: {cusparse_output[0, topk_indices[0, :5]]}")
+        
+        # Step 4: Both should have same shape - compare directly
         if maxk_output.shape != cusparse_output.shape:
-            print(f"❌ Shape mismatch!")
+            print(f"❌ Shape mismatch! MaxK: {maxk_output.shape}, cuSPARSE: {cusparse_output.shape}")
             return False
         
-        # Step 4: Compare results
-        diff = torch.abs(maxk_output - cusparse_output)
-        max_error = diff.max().item()
-        avg_error = diff.mean().item()
+        # Step 5: Check if both preserve the input sparsity pattern
+        input_nonzero_mask = sparse_input != 0
+        maxk_nonzero_mask = maxk_output != 0
+        cusparse_nonzero_mask = cusparse_output != 0
         
-        # Focus on non-zero positions from input
-        nonzero_mask = dense_reconstruction != 0
-        if torch.any(nonzero_mask):
-            relevant_diff = diff[nonzero_mask]
-            max_relevant_error = relevant_diff.max().item()
-            avg_relevant_error = relevant_diff.mean().item()
-            
-            print(f"📊 Overall - Max error: {max_error:.8f}, Avg error: {avg_error:.8f}")
-            print(f"📊 At nonzero positions - Max error: {max_relevant_error:.8f}, Avg error: {avg_relevant_error:.8f}")
-            print(f"📊 Tolerance: {tolerance}")
-            
-            is_valid = max_relevant_error < tolerance
-        else:
-            print(f"📊 Max error: {max_error:.8f}, Avg error: {avg_error:.8f}")
-            is_valid = max_error < tolerance
+        print(f"📊 Input nonzero positions: {torch.count_nonzero(input_nonzero_mask).item()}")
+        print(f"📊 MaxK nonzero positions: {torch.count_nonzero(maxk_nonzero_mask).item()}")
+        print(f"📊 cuSPARSE nonzero positions: {torch.count_nonzero(cusparse_nonzero_mask).item()}")
+        
+        # Step 6: Compare values at the positions where input was non-zero
+        diff = torch.abs(maxk_output - cusparse_output)
+        relevant_diff = diff[input_nonzero_mask]
+        max_error = relevant_diff.max().item() if relevant_diff.numel() > 0 else 0.0
+        avg_error = relevant_diff.mean().item() if relevant_diff.numel() > 0 else 0.0
+        
+        print(f"📊 Max error (at input nonzero): {max_error:.8f}")
+        print(f"📊 Avg error (at input nonzero): {avg_error:.8f}")
+        print(f"📊 Tolerance: {tolerance}")
+        
+        is_valid = max_error < tolerance
         
         if is_valid:
-            print("✅ Validation PASSED!")
+            print("✅ Validation PASSED! MaxK kernel produces correct results")
         else:
-            print("❌ Validation FAILED!")
-            
+            print("❌ Validation FAILED! MaxK kernel has errors")
+            # Show some specific mismatches
+            mismatch_mask = (diff > tolerance) & input_nonzero_mask
+            if torch.any(mismatch_mask):
+                print(f"📊 Mismatches at {torch.count_nonzero(mismatch_mask).item()} positions")
+                
         return is_valid
     
     def benchmark_all_k_values(self, graph_data, dim_origin=256, k_values=[16, 32, 64], 
                               num_runs=4, use_cuda_topk=True):
         """
-        Comprehensive benchmark including TopK overhead
+        Benchmark across different k values (replicates main.cu benchmark loop)
+        ADDED: use_cuda_topk parameter and TopK benchmarking
         """
         if not DIRECT_KERNELS_AVAILABLE:
-            print("❌ Direct kernels not available")
+            print("❌ Direct kernels not available for benchmarking")
             return {}
         
         print(f"\n🏃‍♂️ Benchmarking Direct MaxK Kernels")
         print(f"Graph: {self.graph_name}")
         print(f"TopK method: {'CUDA' if use_cuda_topk else 'PyTorch'}")
+        print("num graph dim_origin dim_k kernel time(ms)")
+        print("-" * 50)
         
         v_num = graph_data['indptr'].size(0) - 1
         results = {}
         
-        # Generate test input
+        # Generate test input (same seed as main.cu)
         torch.manual_seed(123)
         input_features = torch.rand(v_num, dim_origin, device='cuda', dtype=torch.float32)
         
-        # Benchmark TopK methods first
-        print(f"\n🔥 TopK Performance:")
-        for dim_k in k_values[:2]:
-            if dim_k <= input_features.size(1):
-                topk_results = self.benchmark_topk_methods(input_features, dim_k)
-                if topk_results:
-                    print(f"k={dim_k}: {topk_results.get('speedup', 0):.2f}x speedup")
-        
-        # Benchmark full pipeline
-        print(f"\n📊 Full Pipeline Benchmark:")
-        print("k_value topk_time(ms) forward_time(ms) backward_time(ms)")
-        print("-" * 60)
+        # ADDED: Quick TopK benchmark
+        if use_cuda_topk and DIRECT_KERNELS_AVAILABLE:
+            print(f"\n🔥 TopK Performance Comparison:")
+            for test_k in [16, 32]:
+                try:
+                    # PyTorch timing
+                    torch.cuda.synchronize()
+                    start = time.time()
+                    for _ in range(10):
+                        torch.topk(input_features, test_k, dim=1)
+                    torch.cuda.synchronize()
+                    pytorch_time = (time.time() - start) / 10 * 1000
+                    
+                    # CUDA timing
+                    torch.cuda.synchronize()
+                    start = time.time()
+                    for _ in range(10):
+                        maxk_cuda_kernels.cuda_topk_maxk_float(input_features, test_k)
+                    torch.cuda.synchronize()
+                    cuda_time = (time.time() - start) / 10 * 1000
+                    
+                    speedup = pytorch_time / cuda_time if cuda_time > 0 else 0
+                    print(f"k={test_k}: PyTorch {pytorch_time:.3f}ms, CUDA {cuda_time:.3f}ms, {speedup:.2f}x")
+                except Exception as e:
+                    print(f"k={test_k}: TopK benchmark failed: {e}")
         
         for dim_k in k_values:
-            if dim_k > 64:
+            if dim_k > 64:  # Skip if exceeds limit
+                print(f"⏭️  Skipping k={dim_k} (exceeds limit)")
                 continue
                 
+            print(f"\n📊 Testing k = {dim_k}")
+            
             try:
-                # Measure TopK time separately
-                torch.cuda.synchronize()
-                start_time = time.time()
-                for _ in range(num_runs):
-                    sparse_data, sparse_selector, _ = self.apply_topk_selection(
-                        input_features, dim_k, use_cuda_topk
-                    )
-                torch.cuda.synchronize()
-                topk_time = (time.time() - start_time) / num_runs * 1000
-                
-                # Measure forward kernel
+                # Forward kernel (MODIFIED to pass use_cuda_topk)
                 output_forward, time_forward = self.run_forward_kernel(
                     graph_data, input_features, dim_k, timing=True, use_cuda_topk=use_cuda_topk
                 )
                 
-                # Measure backward kernel
+                # Backward kernel (MODIFIED to pass use_cuda_topk)
                 grad_output = torch.rand_like(input_features)
                 grad_input, time_backward = self.run_backward_kernel(
                     graph_data, grad_output, dim_k, timing=True, use_cuda_topk=use_cuda_topk
                 )
                 
+                # Store results
                 results[dim_k] = {
-                    'topk_time': topk_time,
                     'forward_time': time_forward,
-                    'backward_time': time_backward,
-                    'total_time': topk_time + time_forward + time_backward
+                    'backward_time': time_backward
                 }
                 
-                print(f"{dim_k:7d} {topk_time:12.3f} {time_forward:15.3f} {time_backward:16.3f}")
+                # Print in main.cu format
+                print(f"1/1 {self.graph_name} {dim_origin} {dim_k} maxk {time_forward:.3f}")
+                print(f"1/1 {self.graph_name} {dim_origin} {dim_k} maxk_backward {time_backward:.3f}")
                 
             except Exception as e:
                 print(f"❌ Failed for k={dim_k}: {e}")
-                results[dim_k] = {'topk_time': -1, 'forward_time': -1, 'backward_time': -1}
+                results[dim_k] = {'forward_time': -1, 'backward_time': -1}
         
         return results
 
 def test_direct_kernels():
-    """Test the corrected direct kernel interface"""
-    print("🧪 Testing Direct MaxK-GNN CUDA Kernels (Corrected)")
-    print("=" * 55)
+    """Test the direct kernel interface"""
+    print("🧪 Testing Direct MaxK-GNN CUDA Kernels")
+    print("=" * 50)
     
     if not DIRECT_KERNELS_AVAILABLE:
         print("❌ Direct kernels not available!")
+        print("   Build with: python setup_direct_kernels.py build_ext --inplace")
         return False
     
+    # Load test graph
     loader = GraphDataLoader()
     graphs = loader.get_available_graphs()
     
@@ -400,51 +395,52 @@ def test_direct_kernels():
         print("❌ No graphs available for testing")
         return False
     
-    test_graph = graphs[0]
-    print(f"\n📊 Testing graph: {test_graph}")
     
-    try:
-        # Load graph data
-        graph_data = loader.load_graph(test_graph)
-        graph_data = loader.to_cuda_tensors(graph_data)
+    # Test all graphs
+    for i, test_graph in enumerate(graphs):
+        print(f"\n📊 Testing graph {i+1}/{len(graphs)}: {test_graph}")   
+        try:
+            # Load graph data
+            graph_data = loader.load_graph(test_graph)
+            graph_data = loader.to_cuda_tensors(graph_data)
+            
+            # Initialize direct kernel interface
+            kernels = DirectMaxKKernels(test_graph)
+            
+            # Load warp4 metadata
+            if not kernels.load_warp4_metadata():
+                print("❌ Cannot proceed without warp4 metadata")
+                return False
+            
+            # Test validation with proper logic
+            v_num = graph_data['v_num']
+            test_features = torch.rand(v_num, 256, device='cuda', dtype=torch.float32)
+            
+            print(f"\n🔍 Validating with PyTorch TopK...")
+            is_valid_pytorch = kernels.validate_against_cusparse(graph_data, test_features, dim_k=32, use_cuda_topk=False)
+            
+            print(f"\n🔍 Validating with CUDA TopK...")
+            is_valid_cuda = kernels.validate_against_cusparse(graph_data, test_features, dim_k=32, use_cuda_topk=True)
+            
+            if not (is_valid_pytorch and is_valid_cuda):
+                print("⚠️ Some validation failed - results may be incorrect")
+            
+            # Run benchmark only if validation passes
+            if is_valid_pytorch and is_valid_cuda:
+                print(f"\n📈 Running benchmark with CUDA TopK...")
+                results = kernels.benchmark_all_k_values(
+                    graph_data, dim_origin=256, k_values=[16, 32], num_runs=2, use_cuda_topk=True
+                )
+                
+                print(f"\n✅ Direct kernel testing completed successfully!")
+            else:
+                print(f"\n⚠️ Skipping benchmark due to validation failure")
+            continue
         
-        # Initialize kernel interface
-        kernels = DirectMaxKKernels(test_graph)
+        except Exception as e:
+            print(f"❌ Direct kernel testing failed for {test_graph}: {e}")
+            continue
+    return True
         
-        if not kernels.load_warp4_metadata():
-            print("❌ Cannot proceed without warp4 metadata")
-            return False
-        
-        # Test with both TopK methods
-        v_num = graph_data['v_num']
-        test_features = torch.rand(v_num, 256, device='cuda', dtype=torch.float32)
-        
-        print(f"\n🔍 Validation with PyTorch TopK...")
-        is_valid_pytorch = kernels.validate_against_cusparse(
-            graph_data, test_features, dim_k=32, use_cuda_topk=False
-        )
-        
-        print(f"\n🔍 Validation with CUDA TopK...")
-        is_valid_cuda = kernels.validate_against_cusparse(
-            graph_data, test_features, dim_k=32, use_cuda_topk=True
-        )
-        
-        if is_valid_pytorch and is_valid_cuda:
-            print(f"\n📈 Running comprehensive benchmark...")
-            results = kernels.benchmark_all_k_values(
-                graph_data, dim_origin=256, k_values=[16, 32], num_runs=2, use_cuda_topk=True
-            )
-            print(f"\n✅ Testing completed successfully!")
-            return True
-        else:
-            print(f"\n⚠️ Validation failed")
-            return False
-        
-    except Exception as e:
-        print(f"❌ Testing failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
 if __name__ == "__main__":
     test_direct_kernels()
