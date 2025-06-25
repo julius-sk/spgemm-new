@@ -26,6 +26,9 @@ extern "C" {
         const int dim_sparse, const int num_warps,
         dim3 grid, dim3 block, int shared_size
     );
+        // Declare the cuSPARSE function from spmm_cusparse.cu
+    double spmm_cusparse(int *ptr, int *idx, float *val, float *vin, float *vout, 
+                        int num_v, int num_e, int dim, int times);
 }
 
 // CUDA kernel wrapper functions
@@ -147,6 +150,39 @@ torch::Tensor spmm_maxk_backward(
     TORCH_CHECK(error == cudaSuccess, "CUDA kernel failed: ", cudaGetErrorString(error));
     
     return grad_input;
+}
+
+torch::Tensor cusparse_spmm_wrapper(
+    torch::Tensor indptr,
+    torch::Tensor indices, 
+    torch::Tensor values,
+    torch::Tensor input_features,
+    bool timing = false) {
+    
+    TORCH_CHECK(indptr.is_cuda() && indptr.is_contiguous(), "indptr must be CUDA and contiguous");
+    TORCH_CHECK(indices.is_cuda() && indices.is_contiguous(), "indices must be CUDA and contiguous");
+    TORCH_CHECK(values.is_cuda() && values.is_contiguous(), "values must be CUDA and contiguous");
+    TORCH_CHECK(input_features.is_cuda() && input_features.is_contiguous(), "input_features must be CUDA and contiguous");
+    
+    int num_v = indptr.size(0) - 1;
+    int num_e = indices.size(0);
+    int dim = input_features.size(1);
+    
+    // Create output tensor
+    auto output = torch::zeros_like(input_features);
+    
+    // Call the actual cuSPARSE kernel
+    double exec_time = spmm_cusparse(
+        indptr.data_ptr<int>(),
+        indices.data_ptr<int>(),
+        values.data_ptr<float>(),
+        input_features.data_ptr<float>(),
+        output.data_ptr<float>(),
+        num_v, num_e, dim,
+        timing ? 10 : 0  // number of timing runs
+    );
+    
+    return output;
 }
 
 // Utility function to load warp4 metadata
@@ -328,7 +364,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("warp4_metadata"), pybind11::arg("indices"), pybind11::arg("values"),
           pybind11::arg("input_data"), pybind11::arg("sparse_selector"), pybind11::arg("reference_output"),
           pybind11::arg("num_warps"), pybind11::arg("dim_sparse"), pybind11::arg("tolerance") = 0.001f);
-    
+
+    m.def("cusparse_spmm", &cusparse_spmm_wrapper, "cuSPARSE SpMM reference",
+      py::arg("indptr"), py::arg("indices"), py::arg("values"), py::arg("input_features"), py::arg("timing") = false);
+
     // Expose SimpleCudaTimer class
     pybind11::class_<SimpleCudaTimer>(m, "CudaTimer")
         .def(pybind11::init<>())
