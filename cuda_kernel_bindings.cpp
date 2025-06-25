@@ -26,10 +26,11 @@ extern "C" {
         const int dim_sparse, const int num_warps,
         dim3 grid, dim3 block, int shared_size
     );
-        // Declare the cuSPARSE function from spmm_cusparse.cu
-    double spmm_cusparse(int *ptr, int *idx, float *val, float *vin, float *vout, 
-                        int num_v, int num_e, int dim, int times);
 }
+
+// Declare cuSPARSE function (C++ linkage, not extern "C")
+double spmm_cusparse(int *ptr, int *idx, float *val, float *vin, float *vout, 
+                    int num_v, int num_e, int dim, int times);
 
 // CUDA kernel wrapper functions
 torch::Tensor spmm_maxk_forward(
@@ -56,11 +57,12 @@ torch::Tensor spmm_maxk_forward(
     
     // Get dimensions
     int num_v = input_data.size(0);
-    int feat_in = input_data.size(1);
+    int sparse_dim = input_data.size(1);  // This is dim_sparse (32)
     int num_e = indices.size(0);
     
-    // Create output tensor
-    auto output = torch::zeros({num_v, feat_in}, 
+    // FIXED: Create output tensor with FULL dimensions (256), not sparse dimensions
+    const int FULL_DIM = 256;  // Full feature dimension
+    auto output = torch::zeros({num_v, FULL_DIM}, 
                               torch::TensorOptions()
                               .dtype(torch::kFloat32)
                               .device(input_data.device()));
@@ -73,8 +75,8 @@ torch::Tensor spmm_maxk_forward(
     dim3 grid(block_num);
     dim3 block(WARPS_PER_BLOCK * EXT_WARP_DIM);
     
-    // Calculate shared memory size
-    int shared_size = WARPS_PER_BLOCK * feat_in * sizeof(float);
+    // Calculate shared memory size - use FULL dimension for shared memory
+    int shared_size = WARPS_PER_BLOCK * FULL_DIM * sizeof(float);
     
     // Call CUDA kernel
     spmm_kernel_opt2_sparse_v3_wrapper(
@@ -84,7 +86,7 @@ torch::Tensor spmm_maxk_forward(
         input_data.data_ptr<float>(),
         sparse_selector.data_ptr<uint8_t>(),
         output.data_ptr<float>(),
-        num_v, num_e, feat_in, dim_sparse, num_warps,
+        num_v, num_e, FULL_DIM, dim_sparse, num_warps,  // Pass FULL_DIM as feat_in
         grid, block, shared_size
     );
     
@@ -113,10 +115,10 @@ torch::Tensor spmm_maxk_backward(
     
     // Get dimensions
     int num_v = grad_output.size(0);
-    int feat_in = grad_output.size(1);
+    int feat_in = grad_output.size(1);  // Full dimension (256)
     int num_e = indices.size(0);
     
-    // Create output tensor (sparse format)
+    // Create output tensor (sparse format) - CORRECT
     auto grad_input = torch::zeros({num_v, dim_sparse},
                                   torch::TensorOptions()
                                   .dtype(torch::kFloat32)
@@ -185,10 +187,11 @@ torch::Tensor cusparse_spmm_wrapper(
     return output;
 }
 
-// Utility function to load warp4 metadata
+// FIXED: Utility function to load warp4 metadata with correct path
 torch::Tensor load_warp4_metadata(const std::string& graph_name, 
                                   int num_warps = 12, int warp_max_nz = 64) {
-    std::string meta_dir = "../w" + std::to_string(num_warps) + "_nz" + 
+    // FIXED: Correct path for metadata
+    std::string meta_dir = "kernels/w" + std::to_string(num_warps) + "_nz" + 
                           std::to_string(warp_max_nz) + "_warp_4/";
     std::string warp4_file = meta_dir + graph_name + ".warp4";
     
@@ -365,8 +368,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("input_data"), pybind11::arg("sparse_selector"), pybind11::arg("reference_output"),
           pybind11::arg("num_warps"), pybind11::arg("dim_sparse"), pybind11::arg("tolerance") = 0.001f);
 
+    // FIXED: Correct pybind11 namespace
     m.def("cusparse_spmm", &cusparse_spmm_wrapper, "cuSPARSE SpMM reference",
-      py::arg("indptr"), py::arg("indices"), py::arg("values"), py::arg("input_features"), py::arg("timing") = false);
+          pybind11::arg("indptr"), pybind11::arg("indices"), pybind11::arg("values"), 
+          pybind11::arg("input_features"), pybind11::arg("timing") = false);
 
     // Expose SimpleCudaTimer class
     pybind11::class_<SimpleCudaTimer>(m, "CudaTimer")
