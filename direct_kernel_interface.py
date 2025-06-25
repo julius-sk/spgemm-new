@@ -215,7 +215,7 @@ class DirectMaxKKernels:
     def validate_against_cusparse(self, graph_data, input_features, dim_k, tolerance=0.001, use_cuda_topk=True):
         """
         FIXED: Proper validation - MaxK kernel should output FULL dimensions
-        ADDED: use_cuda_topk parameter
+        FIXED: Use SAME TopK selection for both methods
         """
         if not DIRECT_KERNELS_AVAILABLE:
             print("⚠️ Cannot validate - direct kernels not available")
@@ -224,29 +224,45 @@ class DirectMaxKKernels:
         print(f"🔍 Validating MaxK kernel vs cuSPARSE for k={dim_k}")
         print(f"   Using {'CUDA' if use_cuda_topk else 'PyTorch'} TopK")
         
-        # Step 1: Apply TopK to create sparse input (MODIFIED to use specified TopK method)
+        # Step 1: Apply TopK ONCE and use same result for both methods
         if use_cuda_topk and DIRECT_KERNELS_AVAILABLE:
             try:
                 topk_values, topk_indices = maxk_cuda_kernels.cuda_topk_maxk_float(input_features, dim_k)
+                topk_indices_int64 = topk_indices.long()  # For scatter_
+                topk_indices_uint8 = topk_indices.to(torch.uint8)  # For kernels
             except:
-                topk_values, topk_indices = torch.topk(input_features, dim_k, dim=1)
+                topk_values, topk_indices_int64 = torch.topk(input_features, dim_k, dim=1)
+                topk_indices_uint8 = topk_indices_int64.to(torch.uint8)
         else:
-            topk_values, topk_indices = torch.topk(input_features, dim_k, dim=1)
+            topk_values, topk_indices_int64 = torch.topk(input_features, dim_k, dim=1)
+            topk_indices_uint8 = topk_indices_int64.to(torch.uint8)
             
+        # Create sparse input for cuSPARSE using SAME TopK result
         sparse_input = torch.zeros_like(input_features)
-        sparse_input.scatter_(1, topk_indices, topk_values)
+        sparse_input.scatter_(1, topk_indices_int64, topk_values)
         
         print(f"📊 Input shapes: {input_features.shape} -> sparse: {sparse_input.shape}")
         print(f"📊 Input sparsity: {torch.count_nonzero(sparse_input).item()}/{sparse_input.numel()} non-zero")
         
-        # Step 2: Run MaxK kernel - should return FULL dimensions (256)
-        maxk_output, _ = self.run_forward_kernel(graph_data, input_features, dim_k, timing=False, use_cuda_topk=use_cuda_topk)
+        # Step 2: Run MaxK kernel using SAME sparse data
+        sparse_data = topk_values
+        sparse_selector = topk_indices_uint8
+        
+        maxk_output = maxk_cuda_kernels.spmm_maxk_forward(
+            self.warp4_metadata,
+            graph_data['indices'],
+            graph_data['values'],
+            sparse_data,
+            sparse_selector,
+            self.num_warps,
+            dim_k
+        )
         
         print(f"📊 MaxK output shape: {maxk_output.shape}")
         print(f"📊 MaxK output sparsity: {torch.count_nonzero(maxk_output).item()}/{maxk_output.numel()}")
-        print(f"📊 MaxK sample values: {maxk_output[0, topk_indices[0, :5]]}")
+        print(f"📊 MaxK sample values: {maxk_output[0, topk_indices_int64[0, :5]]}")
         
-        # Step 3: Run cuSPARSE reference on the SAME sparse input
+        # Step 3: Run cuSPARSE on SAME sparse input
         cusparse_output = maxk_cuda_kernels.cusparse_spmm(
             graph_data['indptr'], graph_data['indices'], graph_data['values'],
             sparse_input, timing=False
@@ -254,23 +270,15 @@ class DirectMaxKKernels:
         
         print(f"📊 cuSPARSE output shape: {cusparse_output.shape}")
         print(f"📊 cuSPARSE output sparsity: {torch.count_nonzero(cusparse_output).item()}/{cusparse_output.numel()}")
-        print(f"📊 cuSPARSE sample values: {cusparse_output[0, topk_indices[0, :5]]}")
+        print(f"📊 cuSPARSE sample values: {cusparse_output[0, topk_indices_int64[0, :5]]}")
         
         # Step 4: Both should have same shape - compare directly
         if maxk_output.shape != cusparse_output.shape:
             print(f"❌ Shape mismatch! MaxK: {maxk_output.shape}, cuSPARSE: {cusparse_output.shape}")
             return False
         
-        # Step 5: Check if both preserve the input sparsity pattern
+        # Step 5: Compare values at the positions where input was non-zero
         input_nonzero_mask = sparse_input != 0
-        maxk_nonzero_mask = maxk_output != 0
-        cusparse_nonzero_mask = cusparse_output != 0
-        
-        print(f"📊 Input nonzero positions: {torch.count_nonzero(input_nonzero_mask).item()}")
-        print(f"📊 MaxK nonzero positions: {torch.count_nonzero(maxk_nonzero_mask).item()}")
-        print(f"📊 cuSPARSE nonzero positions: {torch.count_nonzero(cusparse_nonzero_mask).item()}")
-        
-        # Step 6: Compare values at the positions where input was non-zero
         diff = torch.abs(maxk_output - cusparse_output)
         relevant_diff = diff[input_nonzero_mask]
         max_error = relevant_diff.max().item() if relevant_diff.numel() > 0 else 0.0
@@ -286,10 +294,6 @@ class DirectMaxKKernels:
             print("✅ Validation PASSED! MaxK kernel produces correct results")
         else:
             print("❌ Validation FAILED! MaxK kernel has errors")
-            # Show some specific mismatches
-            mismatch_mask = (diff > tolerance) & input_nonzero_mask
-            if torch.any(mismatch_mask):
-                print(f"📊 Mismatches at {torch.count_nonzero(mismatch_mask).item()} positions")
                 
         return is_valid
     
