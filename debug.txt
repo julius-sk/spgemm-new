@@ -1,0 +1,224 @@
+✅ Direct CUDA kernels loaded successfully
+🧪 Testing validation against cuSPARSE with k=16
+📊 Test graphs: ['DD']
+
+============================================================
+🔍 Testing graph: DD
+============================================================
+🧪 Testing validation against cuSPARSE with k=16 for DD
+Loading graph: DD
+  indptr file: kernels/graphs/DD.indptr
+  indices file: kernels/graphs/DD.indices
+  Vertices: 334925
+  Edges: 1686092
+  Average degree: 5.03
+/home/labuser/MaxK-GNN/graph_loader.py:93: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /opt/conda/conda-bld/pytorch_1695392035629/work/torch/csrc/utils/tensor_numpy.cpp:206.)
+  cuda_data[key] = torch.from_numpy(value).int().to(device)
+📊 Graph loaded: 334925 vertices, 1686092 edges
+✅ Loaded warp4 metadata: 334925 warps
+✅ Initialized MaxK kernels with metadata
+✅ Created input features: torch.Size([334925, 256])
+📊 CUDA memory before validation:
+   Allocated: 0.36 GB
+   Reserved: 0.36 GB
+
+🔍 Starting validation with k=16...
+Step 1: Starting validation process
+Step 2: Testing with PyTorch TopK...
+🔍 Validating MaxK kernel vs cuSPARSE for k=16
+   Using PyTorch TopK
+📊 Input shapes: torch.Size([334925, 256]) -> sparse: torch.Size([334925, 256])
+📊 Input sparsity: 5358800/85740800 non-zero
+📊 MaxK output shape: torch.Size([334925, 256])
+📊 MaxK output sparsity: 23418076/85740800
+📊 MaxK sample values: tensor([0.0000, 0.0000, 0.7007, 0.0000, 0.0000], device='cuda:0')
+📊 cuSPARSE output shape: torch.Size([334925, 256])
+📊 cuSPARSE output sparsity: 23418405/85740800
+📊 cuSPARSE sample values: tensor([0.0000, 0.0000, 0.7007, 0.0000, 0.0000], device='cuda:0')
+📊 Max error (at input nonzero): 0.95607954
+📊 Avg error (at input nonzero): 0.00000191
+📊 Tolerance: 0.001
+❌ Validation FAILED! MaxK kernel has errors
+PyTorch TopK result: FAILED
+
+Step 3: Testing with CUDA TopK...
+Step 3.1: Testing direct CUDA TopK call...
+Direct CUDA TopK call succeeded: torch.Size([334925, 16]), torch.Size([334925, 16])
+
+Step 3.2: Running full validation with CUDA TopK...
+🔍 Validating MaxK kernel vs cuSPARSE for k=16
+   Using CUDA TopK
+📊 Input shapes: torch.Size([334925, 256]) -> sparse: torch.Size([334925, 256])
+📊 Input sparsity: 4739251/85740800 non-zero
+📊 MaxK output shape: torch.Size([334925, 256])
+📊 MaxK output sparsity: 18477779/85740800
+📊 MaxK sample values: tensor([0.7543, 2.0984, 1.1920, 0.7543, 2.3783], device='cuda:0')
+📊 cuSPARSE output shape: torch.Size([334925, 256])
+📊 cuSPARSE output sparsity: 18478099/85740800
+📊 cuSPARSE sample values: tensor([0.7543, 2.0984, 1.1920, 0.7543, 2.3783], device='cuda:0')
+📊 Max error (at input nonzero): 0.95288539
+📊 Avg error (at input nonzero): 0.00000234
+📊 Tolerance: 0.001
+❌ Validation FAILED! MaxK kernel has errors
+CUDA TopK result: FAILED
+
+⏱️ Validation completed in 0.17 seconds
+🔍 Final result: FAILED
+📊 CUDA memory after validation:
+   Allocated: 0.36 GB
+   Reserved: 2.43 GB
+
+============================================================
+📊 SUMMARY
+============================================================
+DD: ❌ FAILED
+(maxkgnn) labuser@solab-l2:~/MaxK-GNN$ python test_bug_2.py
+✅ Direct CUDA kernels loaded successfully
+🧪 Testing validation against cuSPARSE with k=16
+📊 Test graphs: ['DD']
+
+============================================================
+🔍 Testing graph: DD
+============================================================
+🧪 Testing validation against cuSPARSE with k=16 for DD
+Loading graph: DD
+  indptr file: kernels/graphs/DD.indptr
+  indices file: kernels/graphs/DD.indices
+  Vertices: 334925
+  Edges: 1686092
+  Average degree: 5.03
+/home/labuser/MaxK-GNN/graph_loader.py:93: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /opt/conda/conda-bld/pytorch_1695392035629/work/torch/csrc/utils/tensor_numpy.cpp:206.)
+  cuda_data[key] = torch.from_numpy(value).int().to(device)
+📊 Graph loaded: 334925 vertices, 1686092 edges
+✅ Loaded warp4 metadata: 334925 warps
+✅ Initialized MaxK kernels with metadata
+✅ Created input features: torch.Size([334925, 256])
+📊 CUDA memory before validation:
+   Allocated: 0.36 GB
+   Reserved: 0.36 GB
+
+🔍 Starting validation with k=16...
+Step 1: Starting validation process
+Step 2: Testing with PyTorch TopK...
+🔍 Validating MaxK kernel vs cuSPARSE for k=32
+   Using PyTorch TopK
+📊 Input shapes: torch.Size([334925, 256]) -> sparse: torch.Size([334925, 256])
+📊 Input sparsity: 10717600/85740800 non-zero
+📊 MaxK output shape: torch.Size([334925, 256])
+📊 MaxK output sparsity: 40868829/85740800
+📊 MaxK sample values: tensor([0.6157, 0.0000, 0.7007, 0.8588, 0.0000], device='cuda:0')
+📊 cuSPARSE output shape: torch.Size([334925, 256])
+📊 cuSPARSE output sparsity: 40868829/85740800
+📊 cuSPARSE sample values: tensor([0.6157, 0.0000, 0.7007, 0.8588, 0.0000], device='cuda:0')
+📊 Max error (at input nonzero): 0.00000048
+📊 Avg error (at input nonzero): 0.00000000
+📊 Tolerance: 0.001
+✅ Validation PASSED! MaxK kernel produces correct results
+PyTorch TopK result: SUCCESS
+
+Step 3: Testing with CUDA TopK...
+Step 3.1: Testing direct CUDA TopK call...
+Direct CUDA TopK call succeeded: torch.Size([334925, 32]), torch.Size([334925, 32])
+
+Step 3.2: Running full validation with CUDA TopK...
+🔍 Validating MaxK kernel vs cuSPARSE for k=32
+   Using CUDA TopK
+📊 Input shapes: torch.Size([334925, 256]) -> sparse: torch.Size([334925, 256])
+📊 Input sparsity: 10606813/85740800 non-zero
+📊 MaxK output shape: torch.Size([334925, 256])
+📊 MaxK output sparsity: 39498779/85740800
+📊 MaxK sample values: tensor([0.2839, 0.2046, 0.9223, 0.6446, 1.6760], device='cuda:0')
+📊 cuSPARSE output shape: torch.Size([334925, 256])
+📊 cuSPARSE output sparsity: 39498779/85740800
+📊 cuSPARSE sample values: tensor([0.2839, 0.2046, 0.9223, 0.6446, 1.6760], device='cuda:0')
+📊 Max error (at input nonzero): 0.00000048
+📊 Avg error (at input nonzero): 0.00000000
+📊 Tolerance: 0.001
+✅ Validation PASSED! MaxK kernel produces correct results
+CUDA TopK result: SUCCESS
+
+⏱️ Validation completed in 0.17 seconds
+🔍 Final result: SUCCESS
+📊 CUDA memory after validation:
+   Allocated: 0.36 GB
+   Reserved: 3.12 GB
+
+============================================================
+📊 SUMMARY
+============================================================
+DD: ✅ PASSED
+(maxkgnn) labuser@solab-l2:~/MaxK-GNN$ python test_bug_2.py
+✅ Direct CUDA kernels loaded successfully
+🧪 Testing validation against cuSPARSE with k=16
+📊 Test graphs: ['DD']
+
+============================================================
+🔍 Testing graph: DD
+============================================================
+🧪 Testing validation against cuSPARSE with k=16 for DD
+Loading graph: DD
+  indptr file: kernels/graphs/DD.indptr
+  indices file: kernels/graphs/DD.indices
+  Vertices: 334925
+  Edges: 1686092
+  Average degree: 5.03
+/home/labuser/MaxK-GNN/graph_loader.py:93: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /opt/conda/conda-bld/pytorch_1695392035629/work/torch/csrc/utils/tensor_numpy.cpp:206.)
+  cuda_data[key] = torch.from_numpy(value).int().to(device)
+📊 Graph loaded: 334925 vertices, 1686092 edges
+✅ Loaded warp4 metadata: 334925 warps
+✅ Initialized MaxK kernels with metadata
+✅ Created input features: torch.Size([334925, 256])
+📊 CUDA memory before validation:
+   Allocated: 0.36 GB
+   Reserved: 0.36 GB
+
+🔍 Starting validation with k=16...
+Step 1: Starting validation process
+Step 2: Testing with PyTorch TopK...
+🔍 Validating MaxK kernel vs cuSPARSE for k=18
+   Using PyTorch TopK
+📊 Input shapes: torch.Size([334925, 256]) -> sparse: torch.Size([334925, 256])
+📊 Input sparsity: 6028650/85740800 non-zero
+📊 MaxK output shape: torch.Size([334925, 256])
+📊 MaxK output sparsity: 25893284/85740800
+📊 MaxK sample values: tensor([0.0000, 0.0000, 0.7007, 0.0000, 0.0000], device='cuda:0')
+📊 cuSPARSE output shape: torch.Size([334925, 256])
+📊 cuSPARSE output sparsity: 25893299/85740800
+📊 cuSPARSE sample values: tensor([0.0000, 0.0000, 0.7007, 0.0000, 0.0000], device='cuda:0')
+📊 Max error (at input nonzero): 0.96869618
+📊 Avg error (at input nonzero): 0.00000016
+📊 Tolerance: 0.001
+❌ Validation FAILED! MaxK kernel has errors
+PyTorch TopK result: FAILED
+
+Step 3: Testing with CUDA TopK...
+Step 3.1: Testing direct CUDA TopK call...
+Direct CUDA TopK call succeeded: torch.Size([334925, 18]), torch.Size([334925, 18])
+
+Step 3.2: Running full validation with CUDA TopK...
+🔍 Validating MaxK kernel vs cuSPARSE for k=18
+   Using CUDA TopK
+📊 Input shapes: torch.Size([334925, 256]) -> sparse: torch.Size([334925, 256])
+📊 Input sparsity: 5373051/85740800 non-zero
+📊 MaxK output shape: torch.Size([334925, 256])
+📊 MaxK output sparsity: 20776201/85740800
+📊 MaxK sample values: tensor([2.7218, 2.7218, 1.6326, 2.1543, 0.8948], device='cuda:0')
+📊 cuSPARSE output shape: torch.Size([334925, 256])
+📊 cuSPARSE output sparsity: 20776224/85740800
+📊 cuSPARSE sample values: tensor([2.6654, 2.6654, 1.6326, 2.1543, 0.8948], device='cuda:0')
+📊 Max error (at input nonzero): 1.45105827
+📊 Avg error (at input nonzero): 0.00117566
+📊 Tolerance: 0.001
+❌ Validation FAILED! MaxK kernel has errors
+CUDA TopK result: FAILED
+
+⏱️ Validation completed in 0.16 seconds
+🔍 Final result: FAILED
+📊 CUDA memory after validation:
+   Allocated: 0.36 GB
+   Reserved: 2.43 GB
+
+============================================================
+📊 SUMMARY
+============================================================
+DD: ❌ FAILED
