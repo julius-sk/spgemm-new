@@ -86,3 +86,114 @@ def validate_against_cusparse(self, graph_data, input_features, dim_k, tolerance
     is_valid = max_error < tolerance
     
     # ... rest of the function ...
+
+
+
+🔍 Starting validation with k=16...
+Step 1: Starting validation process
+Step 2: Testing with PyTorch TopK...
+🔍 Validating MaxK kernel vs cuSPARSE for k=18
+   Using PyTorch TopK
+📊 Input shapes: torch.Size([334925, 256]) -> sparse: torch.Size([334925, 256])
+📊 Input sparsity: 6028650/85740800 non-zero
+📊 MaxK output shape: torch.Size([334925, 256])
+📊 MaxK output sparsity: 25893284/85740800
+📊 MaxK sample values: tensor([0.0000, 0.0000, 0.7007, 0.0000, 0.0000], device='cuda:0')
+📊 cuSPARSE output shape: torch.Size([334925, 256])
+📊 cuSPARSE output sparsity: 25893299/85740800
+📊 cuSPARSE sample values: tensor([0.0000, 0.0000, 0.7007, 0.0000, 0.0000], device='cuda:0')
+
+📍 MAX ERROR LOCATION:
+   Row: 334924, Column: 253
+   MaxK value: 0.00000000
+   cuSPARSE value: 1.26681662
+   Difference: 1.26681662
+   Column is in row's TopK: False
+
+📊 CONTEXT AROUND ERROR:
+   TopK columns for row 334924: [169, 46, 233, 41, 100]...
+   Input values at TopK for row 334924:
+     Col 169: 0.999298
+     Col 46: 0.985539
+     Col 233: 0.978613
+     Col 41: 0.971909
+     Col 100: 0.961636
+   MaxK outputs around error position:
+     Col 251: 0.000000
+     Col 252: 0.000000
+     Col 253: 0.000000 <-- ERROR
+     Col 254: 0.000000
+     Col 255: 0.000000
+   Number of large errors in row 334924: 15
+   Large error columns: [29, 53, 82, 91, 92, 95, 115, 124, 147, 179]
+
+📊 OVERALL ERROR STATISTICS:
+   Max error: 0.96869618
+   Avg error: 0.00000016
+   Tolerance: 0.001
+   Elements with error > 0.1: 15 (0.000017%)
+   Elements with error > 0.5: 10 (0.000012%)
+   Elements with error > 0.9: 9 (0.000010%)
+❌ Validation FAILED! MaxK kernel has errors
+PyTorch TopK result: FAILED
+
+Step 3: Testing with CUDA TopK...
+Step 3.1: Testing direct CUDA TopK call...
+Direct CUDA TopK call succeeded: torch.Size([334925, 18]), torch.Size([334925, 18])
+
+Step 3.2: Running full validation with CUDA TopK...
+🔍 Validating MaxK kernel vs cuSPARSE for k=18
+   Using CUDA TopK
+📊 Input shapes: torch.Size([334925, 256]) -> sparse: torch.Size([334925, 256])
+📊 Input sparsity: 5374790/85740800 non-zero
+📊 MaxK output shape: torch.Size([334925, 256])
+📊 MaxK output sparsity: 20782230/85740800
+📊 MaxK sample values: tensor([2.7208, 2.7208, 2.2864, 2.2239, 2.4253], device='cuda:0')
+📊 cuSPARSE output shape: torch.Size([334925, 256])
+📊 cuSPARSE output sparsity: 20782203/85740800
+📊 cuSPARSE sample values: tensor([2.7208, 2.7208, 2.2864, 2.2239, 2.4253], device='cuda:0')
+
+📍 MAX ERROR LOCATION:
+   Row: 71151, Column: 247
+   MaxK value: 0.23250659
+   cuSPARSE value: 1.65403008
+   Difference: 1.42152345
+   Column is in row's TopK: True
+
+📊 CONTEXT AROUND ERROR:
+   TopK columns for row 71151: [254, 240, 248, 247, 251]...
+   Input values at TopK for row 71151:
+     Col 254: 0.364706
+     Col 240: 0.423529
+     Col 248: 0.309804
+     Col 247: 0.709804
+     Col 251: 0.925490
+   MaxK outputs around error position:
+     Col 245: 0.000000
+     Col 246: 0.370164
+     Col 247: 0.232507 <-- ERROR
+     Col 248: 1.808451
+     Col 249: 1.729289
+   Number of large errors in row 71151: 1
+   Large error columns: [247]
+
+📊 OVERALL ERROR STATISTICS:
+   Max error: 1.42152345
+   Avg error: 0.00114733
+   Tolerance: 0.001
+   Elements with error > 0.1: 53839 (0.062793%)
+   Elements with error > 0.5: 8199 (0.009563%)
+   Elements with error > 0.9: 192 (0.000224%)
+❌ Validation FAILED! MaxK kernel has errors
+CUDA TopK result: FAILED
+
+⏱️ Validation completed in 0.19 seconds
+🔍 Final result: FAILED
+📊 CUDA memory after validation:
+   Allocated: 0.36 GB
+   Reserved: 3.12 GB
+
+============================================================
+📊 SUMMARY
+============================================================
+DD: ❌ FAILED
